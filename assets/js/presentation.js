@@ -31,41 +31,56 @@ const stageCenter = document.getElementById('stageCenter');
 const frameScale = document.getElementById('frameScale');
 const slideEls = [...document.querySelectorAll('.deck-slide')];
 let plotsInitialized = false;
-function animateLine(x, y) {
-  if (_animTimer) clearTimeout(_animTimer);
-  var gen = ++_animGen;
-  var visitToken = _slide7VisitToken;
+let plotsReady = null;
+let slideVisit = 0;
+const slideAnimations = {};
+const barTargets = new Map();
+const barRuns = new Map();
 
-  var STEPS = 8;
-  var mc = x.map(function(h) { return (h >= 14 && h <= 19) ? '#b22543' : '#122f5e'; });
-
-  var xs = [x[0]], ys = [y[0]], colors = [mc[0]], sizes = [9];
-  for (var i = 0; i < x.length - 1; i++) {
-    for (var s = 1; s <= STEPS; s++) {
-      var t = s / STEPS;
-      xs.push(x[i] + t * (x[i + 1] - x[i]));
-      ys.push(y[i] + t * (y[i + 1] - y[i]));
-      if (s === STEPS) { colors.push(mc[i + 1]); sizes.push(9); }
-      else             { colors.push('rgba(0,0,0,0)'); sizes.push(0); }
+function resizeVisibleCharts() {
+  const slide = slideEls[currentIndex];
+  if (!slide) return;
+  slide.querySelectorAll('.js-plotly-plot').forEach(el => {
+    if (typeof Plotly !== 'undefined' && el._fullLayout) {
+      Plotly.Plots.resize(el).catch(console.error);
     }
-  }
-
-  var n = 0;
-  function tick() {
-    if (gen !== _animGen) return;
-    if (visitToken !== _slide7VisitToken) return;
-    if (typeof currentIndex !== 'undefined' && currentIndex !== 6) return;
-    n++;
-    Plotly.restyle('todChart', {
-      x: [xs.slice(0, n)],
-      y: [ys.slice(0, n)],
-      marker: [{ color: colors.slice(0, n), size: sizes.slice(0, n), line: { color: '#ffffff', width: 1.5 } }]
-    }, [1]);
-    if (n < xs.length) _animTimer = setTimeout(tick, 15);
-  }
-  _animTimer = setTimeout(tick, 150);
+  });
+  slide.querySelectorAll('canvas').forEach(canvas => {
+    const chart = typeof Chart !== 'undefined' ? Chart.getChart(canvas) : null;
+    if (chart) chart.resize();
+  });
 }
 
+function animateLine(x, y) {
+  clearTimeout(_animTimer);
+  const gen = ++_animGen;
+  const visitToken = _slide7VisitToken;
+  const colors = x.map(h => h >= 14 && h <= 19 ? '#b22543' : '#122f5e');
+  const start = performance.now();
+  const duration = 2200;
+  async function tick() {
+    if (gen !== _animGen || visitToken !== _slide7VisitToken || currentIndex !== 6) return;
+    const progress = Math.min(1, (performance.now() - start) / duration);
+    const position = progress * (x.length - 1);
+    const count = Math.floor(position) + 1;
+    const xs = x.slice(0, count), ys = y.slice(0, count);
+    const markerColors = colors.slice(0, count), sizes = xs.map(() => 9);
+    if (count < x.length) {
+      const fraction = position - Math.floor(position);
+      xs.push(x[count - 1] + fraction * (x[count] - x[count - 1]));
+      ys.push(y[count - 1] + fraction * (y[count] - y[count - 1]));
+      markerColors.push('rgba(0,0,0,0)'); sizes.push(0);
+    }
+    try {
+      await Plotly.restyle('todChart', {
+        x: [xs], y: [ys],
+        marker: [{color: markerColors, size: sizes, line: {color: '#ffffff', width: 1.5}}]
+      }, [1]);
+      if (progress < 1 && gen === _animGen) _animTimer = setTimeout(tick, 16);
+    } catch (error) { console.error('Unable to animate hourly delays:', error); }
+  }
+  tick();
+}
 
 function buildNav() {
   nav.innerHTML = '';
@@ -98,12 +113,17 @@ function updateScale() {
   frameScale.style.transform = `scale(${scale})`;
 }
 
-function updateUI() {
+async function updateUI() {
+  const visit = ++slideVisit;
+  const index = currentIndex;
   const targetSlide = slideEls[currentIndex];
+  clearTimeout(_slideReplayTimer);
+  clearLateHourChart();
+  if (slideAnimations.stopRoutes) slideAnimations.stopRoutes();
   slideEls.forEach((slide, i) => {
     if (i !== currentIndex) slide.classList.remove('active', 'transition-prep');
   });
-  if (targetSlide) targetSlide.classList.add('transition-prep');
+  if (targetSlide) targetSlide.classList.add('active', 'transition-prep');
 
   [...nav.children].forEach((el, i) => el.classList.toggle('active', i === currentIndex));
   progressPill.textContent = `${currentIndex + 1} / ${slides.length}`;
@@ -112,52 +132,26 @@ function updateUI() {
   fsPrevBtn.disabled = currentIndex === 0;
   fsNextBtn.disabled = currentIndex === slides.length - 1;
 
-  if (!plotsInitialized) initPlots();
-  if (typeof Chart !== 'undefined') initCarrierDrill();
-  if (typeof Chart !== 'undefined') initSlotHeat();
-  if (typeof Chart !== 'undefined') initTrendShift();
-
-  requestAnimationFrame(() => {
-    updateScale();
-    if (targetSlide) targetSlide.classList.add('active');
-
-    if (currentIndex !== 6) {
-      _slide7VisitToken += 1;
-      clearLateHourChart();
-    }
-
-    if (plotsInitialized && typeof Plotly !== 'undefined') {
-      ['map','bar','ontime','satisfaction','todChart','routeMap'].forEach((id) => {
-        const el = document.getElementById(id);
-        if (el) {
-          try { Plotly.Plots.resize(el); } catch (e) {}
-        }
-      });
-    }
-    if (typeof Chart !== 'undefined' && window.dispatchEvent) {
-      try { window.dispatchEvent(new Event('resize')); } catch (e) {}
-    }
-    clearTimeout(_slideReplayTimer);
-    if (currentIndex === 6) {
-      _slideReplayTimer = setTimeout(() => {
-        if (targetSlide) targetSlide.classList.remove('transition-prep');
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            const allYearsBtn = document.querySelector('.latehour-year-btn[data-year="All Years"], .year-btn[data-year="All Years"]');
-            if (allYearsBtn) {
-              allYearsBtn.click();
-            } else {
-              applyYearSelection('All Years');
-            }
-          });
-        });
-      }, 140);
-    } else {
-      _slideReplayTimer = setTimeout(() => {
-        replaySlideTransitions(currentIndex);
-      }, 20);
-    }
-  });
+  updateScale();
+  try {
+    if (!plotsReady) plotsReady = initPlots();
+    await plotsReady;
+    if (visit !== slideVisit) return;
+    // Canvas charts need the dimensions of a visible slide on their first render.
+    if (index === 9) initCarrierDrill();
+    if (index === 11) initSlotHeat();
+    if (index === 12) initTrendShift();
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    if (visit !== slideVisit) return;
+    resizeVisibleCharts();
+    targetSlide.classList.remove('transition-prep');
+    if (index === 6) slideAnimations.lateHour('All Years');
+    else replaySlideTransitions(index);
+  } catch (error) {
+    console.error('Unable to initialize presentation charts:', error);
+  } finally {
+    if (visit === slideVisit && targetSlide) targetSlide.classList.remove('transition-prep');
+  }
 }
 
 function goTo(index) {
@@ -194,12 +188,7 @@ document.addEventListener('keydown', (e) => {
 });
 window.addEventListener('resize', () => {
   updateScale();
-  if (plotsInitialized) {
-    ['map', 'bar', 'ontime', 'satisfaction', 'todChart', 'routeMap'].forEach((id) => { const el = document.getElementById(id); if (el) { try { Plotly.Plots.resize(el); } catch (e) {} } });
-  }
-  if (typeof Chart !== 'undefined') {
-    try { window.dispatchEvent(new Event('resize')); } catch (e) {}
-  }
+  resizeVisibleCharts();
 });
 
 
@@ -942,10 +931,7 @@ let _slide7SuppressAutoDraw = false;
 function clearLateHourChart() {
   if (typeof _animTimer !== 'undefined' && _animTimer) clearTimeout(_animTimer);
   _animGen += 1;
-  const chartEl = document.getElementById('todChart');
-  if (chartEl) {
-    try { chartEl.innerHTML = ''; } catch (e) {}
-  }
+  _slide7VisitToken += 1;
 }
 
 let _lateHourAnimating = false;
@@ -964,109 +950,38 @@ function restartCssAnimations(root) {
   });
 }
 
-function replayPlotlyHorizontalBar(plotId, duration) {
-  if (typeof Plotly === 'undefined') return Promise.resolve();
+async function replayPlotlyHorizontalBar(plotId, duration = 1500) {
   const el = document.getElementById(plotId);
-  if (!el || !el.data || !el.data[0] || !Array.isArray(el.data[0].x)) return Promise.resolve();
-
-  const finalX = el.data[0].x.slice();
-  const total = duration || 1500;
-  el.classList.add('transition-prep');
-
-  function easeInOutCubic(t) {
-    return t < 0.5
-      ? 4 * t * t * t
-      : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  const finalX = barTargets.get(plotId);
+  if (!el || !finalX || typeof Plotly === 'undefined') return;
+  const run = (barRuns.get(plotId) || 0) + 1;
+  barRuns.set(plotId, run);
+  const visit = slideVisit;
+  const start = performance.now();
+  async function step() {
+    if (barRuns.get(plotId) !== run || visit !== slideVisit) return;
+    const progress = Math.min(1, (performance.now() - start) / duration);
+    const eased = progress < 0.5 ? 4 * progress ** 3 : 1 - (-2 * progress + 2) ** 3 / 2;
+    try {
+      await Plotly.restyle(el, {x: [finalX.map(v => v * eased)]}, [0]);
+      if (progress < 1 && barRuns.get(plotId) === run) requestAnimationFrame(step);
+    } catch (error) { console.error('Unable to animate ' + plotId + ':', error); }
   }
-
-  return Plotly.restyle(plotId, { x: [finalX.map(() => 0)] }, [0]).then(() => {
-    requestAnimationFrame(() => {
-      el.classList.remove('transition-prep');
-      const start = performance.now();
-
-      function step(now) {
-        const progress = Math.min(1, (now - start) / total);
-        const eased = easeInOutCubic(progress);
-        const currentX = finalX.map(v => v * eased);
-        Plotly.restyle(plotId, { x: [currentX] }, [0]);
-        if (progress < 1) {
-          requestAnimationFrame(step);
-        } else {
-          Plotly.restyle(plotId, { x: [finalX] }, [0]);
-        }
-      }
-
-      // Kick immediately so there is no visible pause at zero before movement starts.
-      step(start + 16);
-      requestAnimationFrame(step);
-    });
-  }).catch(() => {
-    el.classList.remove('transition-prep');
-  });
+  // Never derive replay targets from an interrupted animation's current values.
+  await Plotly.restyle(el, {x: [finalX.map(() => 0)]}, [0]);
+  requestAnimationFrame(step);
 }
 
 function replayWeatherTransition() {
-  const key = window._weatherCurrentKey || (document.getElementById('winterBtn')?.classList.contains('active') ? 'winter' : 'all');
-  if (typeof applyDataset === 'function') applyDataset(key);
-
-  const container = document.querySelector('.weather-bar-chart');
-  if (container) container.classList.add('transition-prep');
-
-  const bars = ['lateBar','carrierBar','nasBar','weatherBar','securityBar']
-    .map(id => document.getElementById(id))
-    .filter(Boolean);
-
-  const values = [...document.querySelectorAll('.weather-bar-value, .weather-security-inline')];
-  const targets = bars.map((bar) => ({ el: bar, width: parseFloat(bar.style.width || '0') || 0 }));
-
-  bars.forEach((bar) => {
-    bar.style.transition = 'none';
-    bar.style.width = '0%';
-  });
-  values.forEach(v => { v.style.transition = 'none'; v.style.opacity = '0'; });
-
-  function easeInOut(t) {
-    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-  }
-
-  requestAnimationFrame(() => {
-    if (container) container.classList.remove('transition-prep');
-    const start = performance.now();
-    const total = 1200;
-    function frame(now) {
-      const p = Math.min(1, (now - start) / total);
-      const e = easeInOut(p);
-      targets.forEach(({el, width}) => { el.style.width = (width * e) + '%'; });
-      if (p < 1) {
-        requestAnimationFrame(frame);
-      } else {
-        values.forEach(v => { v.style.transition = 'opacity 220ms ease'; v.style.opacity = '1'; });
-      }
-    }
-    requestAnimationFrame(frame);
-  });
+  const key = window._weatherCurrentKey || 'all';
+  if (slideAnimations.weather) slideAnimations.weather(key, true);
 }
 
-function replayLateHourTransition(forceAllYears) {
-  if (typeof Plotly === 'undefined' || typeof drawTodChart !== 'function' || typeof seriesByYear === 'undefined') return;
-  const visitToken = ++_slide7VisitToken;
-
-  clearLateHourChart();
-
-  if (forceAllYears) {
-    currentSelection = 'All Years';
-    const yearValueEl = document.getElementById('yearValue');
-    const yearButtons = Array.from(document.querySelectorAll('.latehour-year-btn, .year-btn'));
-    if (yearValueEl) yearValueEl.textContent = currentSelection;
-    yearButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.year === 'All Years'));
-    if (typeof updateKpis === 'function') updateKpis(currentSelection);
+function replayLateHourTransition() {
+  if (currentIndex === 6 && slideAnimations.lateHour) {
+    const selected = document.querySelector('.latehour-year-btn.active');
+    slideAnimations.lateHour(selected ? selected.dataset.year : 'All Years');
   }
-
-  const key = (typeof currentSelection !== 'undefined' && currentSelection) ? currentSelection : 'All Years';
-  if (visitToken !== _slide7VisitToken) return;
-  if (typeof currentIndex !== 'undefined' && currentIndex !== 6) return;
-
-  drawTodChart(key);
 }
 
 function replayRouteStateTransition() {
@@ -1074,7 +989,7 @@ function replayRouteStateTransition() {
   if (list) list.classList.add('transition-prep');
   const fills = [...document.querySelectorAll('#stateList .bar-fill')];
   fills.forEach((el) => {
-    const target = parseFloat(el.style.width || (el.getAttribute('style')?.match(/width:\s*([^;]+)/)?.[1] || '0')) || 0;
+    const target = parseFloat(el.dataset.targetWidth || el.style.width || '0') || 0;
     el.dataset.targetWidth = String(target);
     el.style.transition = 'none';
     el.style.width = '0%';
@@ -1258,7 +1173,7 @@ if (canvas) {
   });
 }
 
-function initPlots() {
+async function initPlots() {
   if (plotsInitialized || typeof Plotly === 'undefined') return;
   plotsInitialized = true;
 
@@ -1316,7 +1231,7 @@ function initPlots() {
     showlegend: false
   };
 
-  Plotly.newPlot('map', [...lineTraces, markerTrace, newarkTrace], {
+  await Plotly.newPlot('map', [...lineTraces, markerTrace, newarkTrace], {
     margin: {l: 0, r: 0, t: 6, b: 0},
     paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
     geo: {
@@ -1325,7 +1240,7 @@ function initPlots() {
     }
   }, {responsive: true, displaylogo: false});
 
-  Plotly.newPlot('bar', [{
+  await Plotly.newPlot('bar', [{
     type: 'bar',
     orientation: 'h',
     x: topBarCodes.map(code => routeData[codeToIndex[code]][1]),
@@ -1394,7 +1309,7 @@ function initPlots() {
   barEl.on('plotly_unhover', () => { Plotly.Fx.unhover('map'); });
 
   setTimeout(() => {
-    ['map', 'bar', 'ontime', 'satisfaction', 'todChart', 'routeMap'].forEach((id) => { const el = document.getElementById(id); if (el) { try { Plotly.Plots.resize(el); } catch (e) {} } });
+    resizeVisibleCharts();
   }, 120);
 
 
@@ -1461,13 +1376,13 @@ function initPlots() {
     }));
   }
 
-  Plotly.newPlot('ontime', [ontimeTrace], {
+  await Plotly.newPlot('ontime', [ontimeTrace], {
     ...commonLayout,
     xaxis: { ...commonLayout.xaxis, title: 'On-time departures (%)', range: [68, 84] },
     annotations: makeInsideAnnotations(ontimeCodes, c => byCode[c].ontime + '%', 68, 0.35)
   }, {responsive: true, displaylogo: false});
 
-  Plotly.newPlot('satisfaction', [satisfactionTrace], {
+  await Plotly.newPlot('satisfaction', [satisfactionTrace], {
     ...commonLayout,
     xaxis: { ...commonLayout.xaxis, title: 'Satisfaction score', range: [550, 675] },
     annotations: makeInsideAnnotations(satCodes, c => byCode[c].sat, 550, 3)
@@ -1543,7 +1458,7 @@ function initPlots() {
     return (v >= 100 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, '')) + "K Min.";
   }
 
-  function applyDataset(key) {
+  function applyDataset(key, replay = false) {
     window._weatherCurrentKey = key;
     const ds = datasets[key];
     document.getElementById("subnote").textContent = ds.subnote;
@@ -1564,7 +1479,7 @@ function initPlots() {
       const val = document.getElementById(valId);
       const item = ds.rows[rowKey];
 
-      const startWidth = parseFloat(bar.style.width || "0") || 0;
+      const startWidth = replay ? 0 : (parseFloat(bar.style.width || "0") || 0);
       const targetWidth = scaledWidth(item.pct, maxPct);
 
       let startPctText = 0;
@@ -1574,7 +1489,8 @@ function initPlots() {
         startPctText = parseFloat((bar.textContent || "0").replace("%","")) || 0;
       }
 
-      const startMinutes = parseMinutesLabel(val.textContent);
+      if (replay) startPctText = 0;
+      const startMinutes = replay ? 0 : parseMinutesLabel(val.textContent);
       const targetMinutes = parseMinutesLabel(item.minutes);
 
       bar.classList.remove("weather-internal", "weather-external");
@@ -1640,18 +1556,19 @@ function initPlots() {
 
   document.getElementById("allBtn").addEventListener("click", () => applyDataset("all"));
   document.getElementById("winterBtn").addEventListener("click", () => applyDataset("winter"));
+  slideAnimations.weather = applyDataset;
   applyDataset("all");
 
   const seriesByYear = {"2022": {"x": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23], "y": [1.19, 1.27, 1.9, 2.57, 3.44, 5.07, 4.82, 5.7, 6.5, 6.94, 7.5, 9.16, 9.78, 12.06, 15.36, 15.59, 13.72, 17.55, 7.14]}, "2023": {"x": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23], "y": [0.56, 1.31, 2.12, 3.0, 3.96, 3.45, 3.69, 5.17, 5.28, 6.14, 7.17, 7.44, 9.28, 9.7, 13.07, 11.94, 10.28, 11.02, 0.06]}, "2024": {"x": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23], "y": [2.28, 1.27, 2.25, 2.88, 3.81, 4.04, 4.66, 5.59, 5.75, 6.73, 7.96, 9.27, 11.71, 11.58, 15.31, 13.97, 12.3, 10.9, 1.15]}, "2025": {"x": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23], "y": [1.23, 1.39, 2.42, 2.69, 4.14, 4.94, 5.75, 7.23, 7.14, 9.19, 10.69, 12.9, 14.26, 14.2, 18.34, 16.69, 15.27, 16.69, 9.65]}, "All Years": {"x": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23], "y": [1.35, 1.31, 2.17, 2.8, 3.83, 4.38, 4.71, 5.91, 6.14, 7.25, 8.26, 9.65, 11.12, 11.77, 15.42, 14.41, 12.81, 13.56, 5.68]}};
   const kpisByYear = {"All Years": {"affected": 58947, "share": 11.7, "total": 3739612}, "2022": {"affected": 15965, "share": 12.9, "total": 923334}, "2023": {"affected": 14269, "share": 10.5, "total": 853522}, "2024": {"affected": 14151, "share": 11.2, "total": 913657}, "2025": {"affected": 14562, "share": 12.2, "total": 1049099}};
   let currentSelection = 'All Years';
   function updateKpis(key) { document.getElementById('kpiAffected').textContent = kpisByYear[key].affected.toLocaleString(); document.getElementById('kpiShare').textContent = `${kpisByYear[key].share.toFixed(1)}%`; document.getElementById('kpiTotal').textContent = kpisByYear[key].total.toLocaleString(); }
-  function drawTodChart(yearKey) {
+  async function drawTodChart(yearKey, visitToken, generation) {
     const hourX = seriesByYear[yearKey].x;
     const hourY = seriesByYear[yearKey].y;
     const maxY = Math.max(...hourY);
 
-    Plotly.newPlot('todChart', [
+    await Plotly.react('todChart', [
       {
         type: 'scatter',
         x: [14, 14, 19, 19, 14],
@@ -1755,19 +1672,30 @@ function initPlots() {
       displaylogo: false,
       modeBarButtonsToRemove: ['select2d', 'lasso2d', 'autoScale2d'],
       displayModeBar: 'hover'
-    }).then(function() { animateLine(hourX, hourY); });
+    });
+    if (currentIndex === 6 && visitToken === _slide7VisitToken && generation === _animGen) {
+      animateLine(hourX, hourY);
+    }
   }
   const yearValueEl = document.getElementById('yearValue'); const yearButtons = Array.from(document.querySelectorAll('.latehour-year-btn'));
+  let hourlyRender = Promise.resolve();
   function applyYearSelection(year) {
     currentSelection = year;
     yearValueEl.textContent = currentSelection;
     yearButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.year === year));
     updateKpis(currentSelection);
-    drawTodChart(currentSelection);
-    if (typeof currentIndex !== 'undefined' && currentIndex === 6) {
-      setTimeout(() => replayLateHourTransition(), 180);
+    clearLateHourChart();
+    const visitToken = _slide7VisitToken;
+    const generation = _animGen;
+    // Serialize redraws so rapid filter changes cannot finish out of order.
+    if (currentIndex === 6) {
+      hourlyRender = hourlyRender.then(() => {
+        if (visitToken !== _slide7VisitToken || generation !== _animGen || currentIndex !== 6) return;
+        return drawTodChart(year, visitToken, generation);
+      }).catch(error => console.error('Unable to render hourly delays:', error));
     }
   }
+  slideAnimations.lateHour = applyYearSelection;
   yearButtons.forEach(btn => btn.addEventListener('click', function() { applyYearSelection(btn.dataset.year); }));
   applyYearSelection('All Years');
 
@@ -1777,14 +1705,40 @@ function initPlots() {
   if (listEl && !listEl.dataset.built) { const maxMin = stateMinutes[0]; stateCodes.forEach(function(code, i) { if (stateMinutes[i] === 0) return; var pct = (stateMinutes[i] / maxMin * 100).toFixed(1); var isTop = i < 3; listEl.insertAdjacentHTML('beforeend', '<div class="routestate-state-row ' + (isTop ? 'top-3' : '') + '"><div class="rank">' + (i + 1) + '</div><div class="code">' + code + '</div><div class="bar-wrap"><div class="bar-fill" style="width:' + pct + '%"></div></div><div class="minutes">' + (stateMinutes[i]/1000).toFixed(0) + 'k</div></div>'); }); listEl.dataset.built = '1'; }
   const EWR = { code:'EWR', name:'Newark Liberty Intl', lat:40.6895, lon:-74.1745 };
   const ORIGINS = [{ code:'ORD', name:"O'Hare Intl (Chicago)", lat:41.9742, lon:-87.9073, state:'IL', delayMin:110800, color:'#b22543' }, { code:'FLL', name:'Fort Lauderdale-Hollywood Intl', lat:26.0726, lon:-80.1527, state:'FL', delayMin:288401, color:'#b22543', note:'FL total (incl. MCO)' }, { code:'MCO', name:'Orlando Intl', lat:28.4312, lon:-81.3081, state:'FL', delayMin:288401, color:'#b22543', note:'FL total (incl. FLL)' }, { code:'CLT', name:'Charlotte Douglas Intl', lat:35.2140, lon:-80.9431, state:'NC', delayMin:170356, color:'#b22543' }, { code:'ATL', name:'Hartsfield-Jackson Atlanta Intl', lat:33.6367, lon:-84.4281, state:'GA', delayMin:137900, color:'#b22543' }, { code:'LAX', name:'Los Angeles Intl', lat:33.9425, lon:-118.4081, state:'CA', delayMin:127758, color:'#b22543' }];
-  var N_PTS=80, TICK_MS=30, STAGGER=12, animTick=0, animTimer=null;
-  function runAnimStep() { var lats=[], lons=[]; ORIGINS.forEach(function(o, i) { var rt=Math.max(0, animTick - i * STAGGER); var n=Math.min(N_PTS, rt); var rLats=[], rLons=[]; for (var j=0; j<=n; j++) { var t=j/N_PTS; rLats.push(o.lat + (EWR.lat - o.lat) * t); rLons.push(o.lon + (EWR.lon - o.lon) * t); } lats.push(rLats); lons.push(rLons); }); Plotly.restyle('routeMap', {lat:lats, lon:lons}, [2,3,4,5,6,7]); animTick++; var maxTick=N_PTS + STAGGER * (ORIGINS.length - 1) + 5; if (animTick <= maxTick) animTimer=setTimeout(runAnimStep, TICK_MS); }
-  function startAnim() { clearTimeout(animTimer); animTick=0; Plotly.restyle('routeMap', {lat:ORIGINS.map(function(){ return []; }), lon:ORIGINS.map(function(){ return []; })}, [2,3,4,5,6,7]); setTimeout(runAnimStep, 300); }
+  const N_PTS = 80, STAGGER = 12;
+  let routeRun = 0;
+  let routeTimer = null;
+  slideAnimations.stopRoutes = () => { routeRun++; clearTimeout(routeTimer); };
+  async function startAnim() {
+    slideAnimations.stopRoutes();
+    const run = routeRun;
+    if (currentIndex !== 7) return;
+    const started = performance.now();
+    async function step() {
+      if (run !== routeRun || currentIndex !== 7) return;
+      const tick = (performance.now() - started) / 30;
+      const lats = [], lons = [];
+      ORIGINS.forEach((origin, i) => {
+        const n = Math.min(N_PTS, Math.max(0, Math.floor(tick - i * STAGGER)));
+        lats.push(Array.from({length: n + 1}, (_, j) => origin.lat + (EWR.lat - origin.lat) * j / N_PTS));
+        lons.push(Array.from({length: n + 1}, (_, j) => origin.lon + (EWR.lon - origin.lon) * j / N_PTS));
+      });
+      try {
+        await Plotly.restyle('routeMap', {lat: lats, lon: lons}, [2,3,4,5,6,7]);
+        if (run === routeRun && tick < N_PTS + STAGGER * (ORIGINS.length - 1)) {
+          routeTimer = setTimeout(step, 30);
+        }
+      } catch (error) { console.error('Unable to animate inbound routes:', error); }
+    }
+    step();
+  }
   var traceChoro={ type:'choropleth', locationmode:'USA-states', locations:stateCodes, z:stateMinutes, colorscale:[[0,'#dde4f0'],[0.15,'#b0c1e0'],[0.4,'#6e8fbd'],[0.7,'#3a6195'],[1,'#122f5e']], marker:{line:{color:'#ffffff', width:1.2}}, colorbar:{title:{text:'Delay<br>minutes', font:{size:11, color:'#3d5278'}}, thickness:12, len:.75, outlinewidth:0, tickfont:{size:10, color:'#3d5278'}, tickformat:',d'}, hovertemplate:'<b>%{location}</b><br>Late-aircraft delay: <b>%{z:,} min</b><extra></extra>'};
   var traceDots={ type:'scattergeo', mode:'markers', lat:[EWR.lat].concat(ORIGINS.map(function(o){ return o.lat; })), lon:[EWR.lon].concat(ORIGINS.map(function(o){ return o.lon; })), marker:{ size:[14,10,10,10,10,10,10], color:['#b22543'].concat(ORIGINS.map(function(o){ return o.color; })), line:{color:'#ffffff', width:1.5}}, customdata:[['EWR','Newark Liberty Intl','Hub Airport','']].concat(ORIGINS.map(function(o){ return [o.code, o.name, (o.delayMin/1000).toFixed(0)+'k min total', o.note||'']; })), hovertemplate:'<b>%{customdata[0]}</b> — %{customdata[1]}<br>Late-inbound delay: <b>%{customdata[2]}</b><br><i>%{customdata[3]}</i><extra></extra>', showlegend:false };
   var routeTraces=ORIGINS.map(function(o){ return { type:'scattergeo', mode:'lines', lat:[], lon:[], line:{ color:o.color, width:2.5 }, hoverinfo:'none', showlegend:false }; });
-  Plotly.newPlot('routeMap', [traceChoro, traceDots].concat(routeTraces), {margin:{l:0,r:0,t:0,b:0}, geo:{scope:'usa', projection:{type:'albers usa'}, bgcolor:'rgba(0,0,0,0)', lakecolor:'#eef2f8', showlakes:true, landcolor:'#f4f6fb', subunitcolor:'#ffffff', showcoastlines:false, framecolor:'rgba(0,0,0,0)'}, paper_bgcolor:'rgba(0,0,0,0)', showlegend:false}, {responsive:true, displaylogo:false, modeBarButtonsToRemove:['select2d','lasso2d'], displayModeBar:'hover'});
+  await Plotly.newPlot('routeMap', [traceChoro, traceDots].concat(routeTraces), {margin:{l:0,r:0,t:0,b:0}, geo:{scope:'usa', projection:{type:'albers usa'}, bgcolor:'rgba(0,0,0,0)', lakecolor:'#eef2f8', showlakes:true, landcolor:'#f4f6fb', subunitcolor:'#ffffff', showcoastlines:false, framecolor:'rgba(0,0,0,0)'}, paper_bgcolor:'rgba(0,0,0,0)', showlegend:false}, {responsive:true, displaylogo:false, modeBarButtonsToRemove:['select2d','lasso2d'], displayModeBar:'hover'});
   document.getElementById('replayBtn').addEventListener('click', startAnim);
-  startAnim();
+  for (const id of ['bar', 'ontime', 'satisfaction']) {
+    barTargets.set(id, document.getElementById(id).data[0].x.slice());
+  }
 
 }
